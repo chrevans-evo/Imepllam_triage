@@ -1,0 +1,50 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Future of Work Lens</title>
+<meta name="description" content="See how every role in an organisation is likely to change with AI.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name" id="brand-name"></span>
+      <span class="brand-product" id="brand-product"></span>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <button type="button" class="tab" data-view="load" id="tab-load">1 · Load roles</button>
+      <button type="button" class="tab" data-view="match" id="tab-match">2 · Check matches <span class="tab-badge" id="review-count" hidden></span></button>
+      <button type="button" class="tab" data-view="org" id="tab-org">3 · Organisation</button>
+      <button type="button" class="tab" data-view="role" id="tab-role">4 · Role deep dive</button>
+    </nav>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <p class="loading">Loading 3,039 jobs…</p>
+  </main>
+
+  <footer class="foot">
+    <p><strong>How to read this.</strong> Scores are estimates made by an AI model (Google Gemini) for each of the skills in a job, then added up for the whole job. Time saved and timelines are model estimates too. Nobody measured these jobs. Use them to start a conversation about work design, not to make decisions about individual people.</p>
+    <p>Source: <a href="https://github.com/Jorisdevreede/AI-ISCO" target="_blank" rel="noopener">AI-ISCO</a> by Joris de Vreede, scores and narratives under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>. This publication uses the <a href="https://esco.ec.europa.eu/" target="_blank" rel="noopener">ESCO classification</a> of the European Commission. The scores, types and narratives are AI-generated additions to ESCO v1.2.1 and are not part of ESCO. ISCO-08 © International Labour Organization.</p>
+  </footer>
+</div>
+
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+<dialog class="picker" id="picker">
+  <form method="dialog" class="picker-inner" id="picker-form">
+    <div class="picker-head">
+      <h2 id="picker-title">Find a job</h2>
+      <button type="submit" class="btn-ghost" aria-label="Close">Close</button>
+    </div>
+    <label class="field">
+      <span>Search 3,039 ESCO jobs by title</span>
+      <input type="search" id="picker-q" autocomplete="off" placeholder="e.g. payroll officer">
+    </label>
+    <ul class="picker-results" id="picker-results"></ul>
+  </form>
+</dialog>
+
+<script type="module" src="app.js"></script>

@@ -22,15 +22,34 @@ It opens on a fictional sample insurer. Use **1 · Load roles** to paste rows fr
 
 | Step | What happens |
 |---|---|
-| Match | Each title is matched to ESCO job titles and their alternative names by shared words, weighted so rare words count more. Level and location words (Senior, APAC, NSW) are ignored. Matches that are weak, or too close to call, are flagged for a person to check. |
-| Score | Each ESCO job carries two scores out of 10, averaged across its skills: how much of the work AI can do, and how much AI boosts the people doing it. The cut-off at 6 gives four types: Shrinking, Transforming, Augmented and Steady. |
-| Narrate | Each job has an AI-written account of how it changes, a before-and-after working week, a timeline and the share of time AI could free up. |
+| Match | Each title is matched to ESCO job titles and their alternative names by shared words. Rare words count more. Level and location words (Senior, APAC, NSW) are ignored. Near-synonyms ("consultant" and "agent", "retail" and "shop") earn half credit. Words that recur across the organisation (such as "insurance") break ties. Weak or too-close-to-call matches are flagged for a person to check. Corrections are remembered in the browser. A hybrid role can be a blend of two jobs. |
+| Work split | Every skill in a job is scored 1–10 on two questions. A skill is **AI can take over** if it scores 7+ on doing the work, **AI assists** if it scores below 7 there but 7+ on boosting people, and **stays human** otherwise. Core skills count twice. This is the headline measure. |
+| Types | The job's average scores, cut at 6, give four types: Shrinking, Transforming, Augmented and Steady. A job within 0.5 of a cut is marked borderline. Types are a secondary tag. |
+| Capacity | Time freed = headcount × the model's time-saved estimate × the adoption you set, phased in over the job's timeline. It is time, not jobs. |
+| Internal moves | For roles where AI can take over 40%+ of the work, the app finds roles in the same organisation that are at least 15 points less exposed and share core skills. Moves into supervisor or manager jobs are marked "Step up" and ranked lower. |
+
+## How good is the matching?
+
+`tests/match_benchmark.json` holds 87 realistic Australian titles, each with the ESCO jobs a person would accept.
+
+```bash
+node tests/match_benchmark.mjs --verbose
+```
+
+| Version | Right first time | Right in top three |
+|---|---|---|
+| First version | 74% | 90% |
+| Current | 83% | 95% |
+
+A department hint was tried and made matching worse at every weight, so it is not used. Most remaining misses come from ESCO itself; for example, ESCO lists "maintenance technician" as another name for welder.
 
 ## Limits to keep in mind in front of a client
 
 - **The scores and stories are estimates from one AI model** (Google Gemini). Nobody measured these jobs. Use them to open a conversation about work design, not to make decisions about individual people.
+- **The headline depends on a cut-off.** For the sample insurer, "AI can take over" is 56% at a skill score of 7, 35% at 8 and 71% at 6. The app shows this range next to the number.
 - **The data describes the standard ESCO job**, not the client's version of it. A title match is only as good as the review step.
-- **Office-heavy organisations cluster.** Most office jobs score high on "AI boosts people", so they land in Transforming or Augmented. The role map zooms in to show the differences inside a cluster.
+- **Office-heavy organisations cluster** in the Transforming and Augmented types, which is why the work split is the headline.
+- **Internal moves are thin when everything is exposed.** In the sample insurer most exposed roles have no less-exposed role nearby. That is a finding, not a bug.
 - **ESCO is a European catalogue.** It has no Australian headcount or pay data.
 
 ## Data and licences

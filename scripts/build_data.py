@@ -22,6 +22,30 @@ MAX_ADJACENT = 4
 MAX_GAP_SKILLS = 3
 MAX_ALT_LABELS = 25
 DESC_CHARS = 320
+# Work split: a skill counts as "AI can take over" when its automation score
+# is at least this, and as "AI assists" when automation is below it but
+# amplification reaches it. Everything else "stays human".
+SPLIT_AT = 7
+# Types are cut at 6 on the job scores; within this distance a job is borderline.
+BORDERLINE = 0.5
+
+
+def take_share(essential, optional, skills, at):
+    """Share of a job's skill weight scoring at least `at` on automation."""
+    weighted = [(skills[s], 2) for s in essential if s in skills] + [(skills[s], 1) for s in optional if s in skills]
+    total = sum(w for _, w in weighted)
+    return round(sum(w for sk, w in weighted if sk["a"] >= at) / total, 3) if total else 0.0
+
+
+def work_split(essential, optional, skills):
+    """Share of a job's skill weight in each bucket; essential skills count twice."""
+    weighted = [(skills[s], 2) for s in essential if s in skills] + [(skills[s], 1) for s in optional if s in skills]
+    total = sum(w for _, w in weighted)
+    if not total:
+        return [0.0, 0.0, 1.0]
+    take = sum(w for sk, w in weighted if sk["a"] >= SPLIT_AT) / total
+    assist = sum(w for sk, w in weighted if sk["a"] < SPLIT_AT and sk["m"] >= SPLIT_AT) / total
+    return [round(take, 3), round(assist, 3), round(1 - take - assist, 3)]
 
 
 def main(src: Path, out: Path) -> None:
@@ -34,7 +58,8 @@ def main(src: Path, out: Path) -> None:
             esco[row["preferredLabel"].strip().lower()] = row
 
     all_skills = portfolio["skills"]
-    used = set()
+    used = set()      # skills shown with scores and rationale
+    named = set()     # skills only needed by name (internal moves)
     jobs = []
     for o in portfolio["occupations"]:
         n = o["n"]
@@ -50,6 +75,11 @@ def main(src: Path, out: Path) -> None:
         se.sort(key=lambda s: -max(all_skills[s]["a"] or 0, all_skills[s]["m"] or 0))
         se = se[:MAX_ESSENTIAL_SKILLS]
         used.update(se)
+
+        # Full skill lists, used in the browser to find moves inside an organisation.
+        sea = [s for s in o["se"] if s in all_skills]
+        soa = [s for s in o["so"] if s in all_skills]
+        named.update(sea)
 
         adj = []
         for a in o["adj"][:MAX_ADJACENT]:
@@ -67,8 +97,14 @@ def main(src: Path, out: Path) -> None:
             "ar": o["ar"],
             "ap": o["ap"],
             "alt": alts[:MAX_ALT_LABELS],
+            "sh": work_split(sea, soa, all_skills),
+            # "AI can take over" if the line were drawn one point lower or higher.
+            "tk": [take_share(sea, soa, all_skills, SPLIT_AT - 1), take_share(sea, soa, all_skills, SPLIT_AT + 1)],
+            "bl": min(abs(o["ar"] - 6), abs(o["ap"] - 6)) < BORDERLINE,
             "d": desc,
             "se": se,
+            "sea": sea,
+            "soa": soa,
             "adj": adj,
             "n": {
                 "story": n["story"],
@@ -83,6 +119,7 @@ def main(src: Path, out: Path) -> None:
         })
 
     skills = {k: [v["t"], v["a"], v["m"], v.get("r", "")] for k, v in all_skills.items() if k in used}
+    skills.update({k: [all_skills[k]["t"], all_skills[k]["a"], all_skills[k]["m"]] for k in named - used})
     missing_alt = sum(1 for j in jobs if not j["alt"] and not j["d"])
     meta = {
         "built": date.today().isoformat(),
@@ -91,10 +128,10 @@ def main(src: Path, out: Path) -> None:
         "source": "AI-ISCO (github.com/Jorisdevreede/AI-ISCO), Gemini score set",
     }
     # Small index, loaded first: enough to match titles and draw the organisation view.
-    index_keys = ("s", "t", "c", "mg", "ug", "q", "ar", "ap", "alt")
+    index_keys = ("s", "t", "c", "mg", "ug", "q", "ar", "ap", "alt", "sh", "tk", "bl")
     index = [{**{k: j[k] for k in index_keys}, "ts": j["n"]["ts"], "tl": j["n"]["tl"]} for j in jobs]
     # Detail, loaded in the background: everything the job view needs.
-    detail = {j["s"]: {k: j[k] for k in ("d", "se", "adj", "n")} for j in jobs}
+    detail = {j["s"]: {k: j[k] for k in ("d", "se", "sea", "soa", "adj", "n")} for j in jobs}
 
     out.mkdir(parents=True, exist_ok=True)
     for name, payload in (("jobs_index.json", {"meta": meta, "jobs": index}),

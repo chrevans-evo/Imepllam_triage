@@ -36,15 +36,20 @@ python3 scripts/au/load_osca.py
 # 1b. Load the ASC (3.0 workbook, or the strayr beta data folder)
 python3 scripts/au/load_asc.py path/to/ASC_release_3.xlsx
 
-# 2. Score every task for AI impact (needs ANTHROPIC_API_KEY)
-python3 scripts/au/score_tasks.py --dry-run      # plan and first request, no API calls
-python3 scripts/au/score_tasks.py --sample 25    # spot-check 25 tasks before paying for all
-python3 scripts/au/score_tasks.py --submit       # the rest, via the Batches API (half price)
-python3 scripts/au/score_tasks.py --collect --wait
+# 2. Score every OSCA task for AI impact (needs ANTHROPIC_API_KEY; about US$10-20)
+python3 scripts/au/score_tasks.py --source osca --dry-run      # plan and first request, no API calls
+python3 scripts/au/score_tasks.py --source osca --sample 25    # spot-check 25 tasks before paying for all
+python3 scripts/au/score_tasks.py --source osca --submit       # the rest, via the Batches API (half price)
+python3 scripts/au/score_tasks.py --source osca --collect --wait
 ```
 
-Still to build, once the blocked sources are downloaded:
+Decided: **OSCA tasks drive the work split**, weighted by ASC time shares where
+an OSCA occupation links to the ASC through ANZSCO, and equally elsewhere
+(flagged in the app).
 
+Still to build:
+
+2b. `scripts/au/weight_tasks.py` (after ASC 3.0 is uploaded): for each linked OSCA occupation, map the ASC time shares onto its OSCA tasks. Kept separate from scoring so new ASC data never forces a re-score.
 3. `scripts/au/build_au_data.py`: join ASC tasks + task scores + JSA exposure + ANZSCO/OSCA codes + the ISCO link into the app's data files.
 4. App changes: match titles through ESCO's alternative names to ANZSCO, headline the time-weighted work split, show JSA's official exposure alongside, list ASC tasks, tools and competencies on the role page.
 5. Validation: compare the task-derived occupation scores with JSA's exposure scores. If they disagree badly, say so in the app rather than hide it.

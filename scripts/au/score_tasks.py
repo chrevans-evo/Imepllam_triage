@@ -1,4 +1,10 @@
-"""Score every Australian Skills Classification specialist task for AI impact.
+"""Score Australian work tasks for AI impact.
+
+Sources:
+  osca  every OSCA 2024 main task (data/au/osca.json), scored with its
+        occupation for context. This is the app's primary task set.
+  asc   every distinct Australian Skills Classification specialist task
+        (data/au/asc.json).
 
 Each task gets two 1-10 scores on the same scale the app already uses for
 ESCO skills, so the Australian and European numbers stay comparable:
@@ -7,17 +13,17 @@ ESCO skills, so the Australian and European numbers stay comparable:
 plus a physical flag and a one-line reason.
 
 Runs through the Message Batches API (half price, results within 24 hours).
-Resumable: tasks already in data/au/task_scores.json are skipped, and a
-submitted batch is recorded in data/au/score_batch.json so it can be
-collected later.
+Resumable: tasks already in data/au/task_scores_<source>.json are skipped, and
+a submitted batch is recorded in data/au/score_batch_<source>.json (with each
+task's key) so results can be collected later, even if the inputs change.
 
 Needs ANTHROPIC_API_KEY (or an `ant auth login` profile).
 
 Usage:
-  python3 scripts/au/score_tasks.py --dry-run     # show the plan and one request, no API calls
-  python3 scripts/au/score_tasks.py --sample 25   # score 25 tasks now, synchronously, to spot-check
-  python3 scripts/au/score_tasks.py --submit      # submit the rest as one batch
-  python3 scripts/au/score_tasks.py --collect     # fetch results of the submitted batch
+  python3 scripts/au/score_tasks.py --source osca --dry-run     # plan and one request, no API calls
+  python3 scripts/au/score_tasks.py --source osca --sample 25   # score 25 tasks now, to spot-check
+  python3 scripts/au/score_tasks.py --source osca --submit      # submit the rest as one batch
+  python3 scripts/au/score_tasks.py --source osca --collect --wait
 """
 import argparse
 import json
@@ -30,18 +36,16 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 from anthropic.types.messages.batch_create_params import Request
 
 ROOT = Path(__file__).resolve().parents[2]
-ASC = ROOT / "data/au/asc.json"
-SCORES = ROOT / "data/au/task_scores.json"
-BATCH = ROOT / "data/au/score_batch.json"
+DATA = ROOT / "data/au"
 
 MODEL = "claude-opus-5"
 TASKS_PER_REQUEST = 25
 RUBRIC_VERSION = "au-task-v1"
 
 # Fixed system prompt: identical on every request so it caches.
-SYSTEM = """You score work tasks from the Australian Skills Classification for the likely impact of AI on them over the next three to five years.
+SYSTEM = """You score work tasks done in Australian occupations for the likely impact of AI on them over the next three to five years.
 
-Score each task on two questions, from 1 to 10. Judge AI as it is commercially available and in use in Australian workplaces, plus capabilities that are demonstrated and likely to be deployed within five years. Do not score on speculative future capability.
+Score each task on two questions, from 1 to 10. Judge AI as it is commercially available and in use in Australian workplaces, plus capabilities that are demonstrated and likely to be deployed within five years. Do not score on speculative future capability. When an occupation is given in brackets, score the task as that occupation does it.
 
 automation: How much of this task can AI (including AI agents working inside business software) carry out end to end, with a person only checking the result?
   1-2  AI cannot do it. Needs physical presence, touch, or a human relationship at its core.
@@ -97,114 +101,132 @@ SCHEMA = {
 }
 
 
-def load_state():
-    asc = json.loads(ASC.read_text())
-    tasks = asc["tasks"]
-    scores = json.loads(SCORES.read_text()) if SCORES.exists() else {"meta": {}, "tasks": {}}
-    todo = [i for i, t in enumerate(tasks) if t not in scores["tasks"]]
-    return tasks, scores, todo
+def paths(source):
+    return DATA / f"task_scores_{source}.json", DATA / f"score_batch_{source}.json"
 
 
-def chunks(ids, n=TASKS_PER_REQUEST):
-    for i in range(0, len(ids), n):
-        yield ids[i:i + n]
+def load_items(source) -> list[dict]:
+    """Every task to score, as {key, text, occ}, in a stable order."""
+    if source == "osca":
+        occ = json.loads((DATA / "osca.json").read_text())["occupations"]
+        return [{"key": f"{c}.{i}", "text": t, "occ": o["title"]}
+                for c, o in sorted(occ.items()) for i, t in enumerate(o["tasks"])]
+    tasks = json.loads((DATA / "asc.json").read_text())["tasks"]
+    return [{"key": t, "text": t, "occ": None} for t in tasks]
 
 
-def params_for(tasks, ids):
-    listing = "\n".join(f"{i}: {tasks[i]}" for i in ids)
+def load_state(source):
+    scores_path, _ = paths(source)
+    items = load_items(source)
+    scores = json.loads(scores_path.read_text()) if scores_path.exists() else {"meta": {}, "tasks": {}}
+    todo = [it for it in items if it["key"] not in scores["tasks"]]
+    return items, scores, todo
+
+
+def chunks(items, n=TASKS_PER_REQUEST):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def params_for(part):
+    """One request; ids are local to the request (0..n-1)."""
+    listing = "\n".join(f"{n}: [{it['occ']}] {it['text']}" if it["occ"] else f"{n}: {it['text']}"
+                        for n, it in enumerate(part))
     return {
         "model": MODEL,
         "max_tokens": 16000,
         "system": [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
         "thinking": {"type": "adaptive"},
         "output_config": {"format": {"type": "json_schema", "schema": SCHEMA}},
-        "messages": [{"role": "user", "content": f"Score these {len(ids)} tasks.\n\n{listing}"}],
+        "messages": [{"role": "user", "content": f"Score these {len(part)} tasks.\n\n{listing}"}],
     }
 
 
-def absorb(names: dict[int, str], scores, message) -> list[int]:
-    """Store valid scores from one response; return the ids still missing.
-    `names` maps each id sent in the request to its task text."""
-    ids = sorted(names)
+def absorb(keys: list[str], scores, message) -> list[str]:
+    """Store valid scores from one response; return the keys still missing.
+    `keys[n]` is the task key sent as local id n."""
     if message.stop_reason == "refusal":
-        return ids
+        return list(keys)
     text = next((b.text for b in message.content if b.type == "text"), "")
     try:
         rows = json.loads(text)["scores"]
-    except (json.JSONDecodeError, KeyError):
-        return ids
-    wanted = set(ids)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return list(keys)
+    missing = set(range(len(keys)))
     for r in rows:
-        i = r.get("id")
-        if i not in wanted:
+        n = r.get("id")
+        if n not in missing:
             continue
         a, m = r.get("automation"), r.get("amplification")
         if not (isinstance(a, int) and isinstance(m, int) and 1 <= a <= 10 and 1 <= m <= 10):
             continue
-        scores["tasks"][names[i]] = {"a": a, "m": m, "phys": bool(r.get("physical")), "r": str(r.get("reason", ""))[:300]}
-        wanted.discard(i)
-    return sorted(wanted)
+        scores["tasks"][keys[n]] = {"a": a, "m": m, "phys": bool(r.get("physical")), "r": str(r.get("reason", ""))[:300]}
+        missing.discard(n)
+    return [keys[n] for n in sorted(missing)]
 
 
-def save(scores):
-    scores["meta"] = {"model": MODEL, "rubric": RUBRIC_VERSION, "scored": len(scores["tasks"])}
-    SCORES.parent.mkdir(parents=True, exist_ok=True)
-    SCORES.write_text(json.dumps(scores, ensure_ascii=False, indent=1, sort_keys=True))
+def save(source, scores):
+    scores_path, _ = paths(source)
+    scores["meta"] = {"source": source, "model": MODEL, "rubric": RUBRIC_VERSION, "scored": len(scores["tasks"])}
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scores_path.write_text(json.dumps(scores, ensure_ascii=False, indent=1, sort_keys=True))
 
 
-def dry_run():
-    tasks, scores, todo = load_state()
+def dry_run(source):
+    items, scores, todo = load_state(source)
     reqs = list(chunks(todo))
-    print(f"{len(tasks)} tasks, {len(scores['tasks'])} already scored, {len(todo)} to score "
+    print(f"{source}: {len(items)} tasks, {len(scores['tasks'])} already scored, {len(todo)} to score "
           f"in {len(reqs)} requests of up to {TASKS_PER_REQUEST}.")
     if reqs:
-        p = params_for(tasks, reqs[0])
-        print("\nFirst request (system prompt shortened):")
+        p = params_for(reqs[0])
         shown = {**p, "system": SYSTEM[:160] + "…", "output_config": "json_schema (scores[])"}
+        print("\nFirst request (system prompt shortened):")
         print(json.dumps(shown, indent=1, ensure_ascii=False)[:2500])
 
 
-def sample(n):
-    tasks, scores, todo = load_state()
+def sample(source, n):
+    _, scores, todo = load_state(source)
     client = anthropic.Anthropic()
-    ids = todo[:n]
+    part_all = todo[:n]
     missing = []
-    for part in chunks(ids):
-        msg = client.messages.create(**params_for(tasks, part))
-        missing += absorb({i: tasks[i] for i in part}, scores, msg)
-    save(scores)
-    print(f"Scored {len(ids) - len(missing)} of {len(ids)} tasks.")
-    for i in ids:
-        s = scores["tasks"].get(tasks[i])
+    for part in chunks(part_all):
+        msg = client.messages.create(**params_for(part))
+        missing += absorb([it["key"] for it in part], scores, msg)
+    save(source, scores)
+    print(f"Scored {len(part_all) - len(missing)} of {len(part_all)} tasks.")
+    for it in part_all:
+        s = scores["tasks"].get(it["key"])
         if s:
-            print(f"  a{s['a']:>2} m{s['m']:>2} {'P' if s['phys'] else ' '}  {tasks[i]}  ({s['r']})")
+            occ = f"[{it['occ']}] " if it["occ"] else ""
+            print(f"  a{s['a']:>2} m{s['m']:>2} {'P' if s['phys'] else ' '}  {occ}{it['text']}  ({s['r']})")
     if missing:
         print(f"Not scored (re-run to retry): {len(missing)}")
 
 
-def submit():
-    if BATCH.exists():
-        sys.exit(f"A batch is already recorded in {BATCH.relative_to(ROOT)}. Run --collect first.")
-    tasks, scores, todo = load_state()
+def submit(source):
+    _, batch_path = paths(source)
+    if batch_path.exists():
+        sys.exit(f"A batch is already recorded in {batch_path.relative_to(ROOT)}. Run --collect first.")
+    _, _, todo = load_state(source)
     if not todo:
         print("Every task is already scored.")
         return
-    # Keep each id's task text with the batch, so results still attach to the
-    # right task if data/au/asc.json is rebuilt before they are collected.
-    groups = {f"t{k:04d}": {str(i): tasks[i] for i in part} for k, part in enumerate(chunks(todo))}
+    parts = list(chunks(todo))
+    groups = {f"t{k:04d}": [it["key"] for it in part] for k, part in enumerate(parts)}
     client = anthropic.Anthropic()
     batch = client.messages.batches.create(requests=[
-        Request(custom_id=cid, params=MessageCreateParamsNonStreaming(**params_for(tasks, [int(i) for i in g])))
-        for cid, g in groups.items()
+        Request(custom_id=cid, params=MessageCreateParamsNonStreaming(**params_for(part)))
+        for cid, part in zip(groups, parts)
     ])
-    BATCH.write_text(json.dumps({"id": batch.id, "groups": groups}, indent=1))
+    batch_path.write_text(json.dumps({"id": batch.id, "groups": groups}, indent=1))
     print(f"Submitted batch {batch.id}: {len(groups)} requests, {len(todo)} tasks. Run --collect later.")
 
 
-def collect(wait: bool):
-    if not BATCH.exists():
+def collect(source, wait: bool):
+    _, batch_path = paths(source)
+    if not batch_path.exists():
         sys.exit("No submitted batch recorded. Run --submit first.")
-    rec = json.loads(BATCH.read_text())
+    rec = json.loads(batch_path.read_text())
     client = anthropic.Anthropic()
     while True:
         b = client.messages.batches.retrieve(rec["id"])
@@ -214,22 +236,20 @@ def collect(wait: bool):
             print(f"Batch {rec['id']} is {b.processing_status} ({b.request_counts.processing} still processing).")
             return
         time.sleep(60)
-    _, scores, _ = load_state()
+    _, scores, _ = load_state(source)
     retry = []
     for res in client.messages.batches.results(rec["id"]):
-        names = {int(i): t for i, t in rec["groups"].get(res.custom_id, {}).items()}
-        if res.result.type == "succeeded":
-            retry += absorb(names, scores, res.result.message)
-        else:
-            retry += sorted(names)
-    save(scores)
-    BATCH.unlink()
+        keys = rec["groups"].get(res.custom_id, [])
+        retry += absorb(keys, scores, res.result.message) if res.result.type == "succeeded" else keys
+    save(source, scores)
+    batch_path.unlink()
     print(f"Collected. {len(scores['tasks'])} tasks scored in total; {len(retry)} missed. "
           + ("Run --submit again to score the rest." if retry else "All done."))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--source", choices=["osca", "asc"], default="osca")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true")
     g.add_argument("--sample", type=int, metavar="N")
@@ -238,10 +258,10 @@ if __name__ == "__main__":
     ap.add_argument("--wait", action="store_true", help="with --collect, poll until the batch ends")
     a = ap.parse_args()
     if a.dry_run:
-        dry_run()
+        dry_run(a.source)
     elif a.sample:
-        sample(a.sample)
+        sample(a.source, a.sample)
     elif a.submit:
-        submit()
+        submit(a.source)
     else:
-        collect(a.wait)
+        collect(a.source, a.wait)
